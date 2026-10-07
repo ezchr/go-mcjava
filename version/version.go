@@ -7,8 +7,8 @@
 package version
 
 import (
-	"github.com/ezchr/go-mcjava/v776"
-	"github.com/ezchr/go-mcjava/v777"
+	v776 "github.com/ezchr/go-mcjava/v776"
+	v777 "github.com/ezchr/go-mcjava/v777"
 )
 
 // Packet is a packet id and body.

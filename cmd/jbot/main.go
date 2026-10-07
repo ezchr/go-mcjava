@@ -19,6 +19,8 @@ import (
 	"github.com/ezchr/go-mcjava/wire"
 )
 
+var eat = flag.Bool("eat", false, "press use once 3 s after spawning (eat the held food) and log food updates")
+
 var command = flag.String("cmd", "", "run this command (without /) 3 s after spawning and log the replies")
 
 func main() {
@@ -140,6 +142,8 @@ func run(addr, name string, stay time.Duration, attack, still bool) error {
 				c.Send(v777.ServerboundPlayAcceptTeleportation, rw.B)
 				tpCount++
 				pos <- [3]float64{x, y, z}
+			case v777.ClientboundPlayCommands:
+				dumpCommands(body)
 			case v777.ClientboundPlayKeepAlive:
 				c.Send(v777.ServerboundPlayKeepAlive, body)
 			case v777.ClientboundPlayLevelChunkWithLight:
@@ -241,6 +245,16 @@ func run(addr, name string, stay time.Duration, attack, still bool) error {
 			log.Printf("%s: corrected to %.2f %.2f %.2f", name, p[0], p[1], p[2])
 			cur = p
 		case <-t.C:
+			if *eat && time.Since(start) > 3*time.Second {
+				w.Reset()
+				w.VarInt(0) // main hand
+				w.VarInt(9) // sequence
+				w.Float32(0)
+				w.Float32(0)
+				c.Send(v777.ServerboundPlayUseItem, w.B)
+				log.Printf("%s: use item (eat)", name)
+				*eat = false
+			}
 			if *command != "" && time.Since(start) > 3*time.Second {
 				w.Reset()
 				w.String(*command)

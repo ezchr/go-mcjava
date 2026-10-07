@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/ezchr/go-mcjava/server"
-	"github.com/ezchr/go-mcjava/v777"
+	v777 "github.com/ezchr/go-mcjava/v777"
 	"github.com/ezchr/go-mcjava/wire"
 )
 
