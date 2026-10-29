@@ -24,8 +24,9 @@ bounds-checked, and the encoders are checked byte for byte against vanilla.
 | `chunk` | `level_chunk_with_light` encoding and decoding |
 | `item` | Item stacks (slots) with data component patches, per version |
 | `text` | Network NBT text components and legacy colour codes |
+| `textcolour` | Bedrock's colour code palette and colour gradients (`<gradient:#FF2020:&6>text</gradient>`) for either edition |
 | `cmd/javagen`, `cmd/remapgen` | Generate the `vNNN` packages and the remap tables from Mojang's reports |
-| `cmd/jbot`, `cmd/jflat`, `cmd/chunkdiff` | A scripted test client, a flat test server, and a chunk comparison tool |
+| `cmd/jbot`, `cmd/jbot262`, `cmd/jflat`, `cmd/chunkdiff` | Scripted test clients (26.3 and 26.2), a flat test server, and a chunk comparison tool |
 
 ## Licence
 

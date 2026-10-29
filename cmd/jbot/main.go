@@ -11,6 +11,7 @@ import (
 	"log"
 	"math"
 	"net"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -21,7 +22,13 @@ import (
 
 var eat = flag.Bool("eat", false, "press use once 3 s after spawning (eat the held food) and log food updates")
 
-var command = flag.String("cmd", "", "run this command (without /) 3 s after spawning and log the replies")
+var command = flag.String("cmd", "", "run these commands (without /, separated by ;) 3 s apart from 3 s after spawning, logging the replies")
+
+// cmdQueue is what is left of -cmd; lastCmd when the last one was sent.
+var (
+	cmdQueue []string
+	lastCmd  time.Time
+)
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:25620", "server")
@@ -255,12 +262,16 @@ func run(addr, name string, stay time.Duration, attack, still bool) error {
 				log.Printf("%s: use item (eat)", name)
 				*eat = false
 			}
-			if *command != "" && time.Since(start) > 3*time.Second {
-				w.Reset()
-				w.String(*command)
-				c.Send(v777.ServerboundPlayChatCommand, w.B)
-				log.Printf("%s: sent /%s", name, *command)
+			if *command != "" && cmdQueue == nil {
+				cmdQueue = strings.Split(*command, ";")
 				*command = ""
+			}
+			if len(cmdQueue) > 0 && time.Since(start) > 3*time.Second && time.Since(lastCmd) > 3*time.Second {
+				w.Reset()
+				w.String(cmdQueue[0])
+				c.Send(v777.ServerboundPlayChatCommand, w.B)
+				log.Printf("%s: sent /%s", name, cmdQueue[0])
+				cmdQueue, lastCmd = cmdQueue[1:], time.Now()
 			}
 			if attack || still {
 				step++
