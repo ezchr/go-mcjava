@@ -157,6 +157,9 @@ type Player struct {
 	// Version is the client's protocol version: the server writes v777 ids and remaps them with it.
 	Version *version.Version
 	Address string // what the client typed to connect (host)
+	// Port is the port the client connected to, as its handshake says: the public port, which is
+	// not the listener's own behind a port forward or an SRV record.
+	Port uint16
 	// ForwardedIP is the client's address as a Velocity proxy forwarded it, "" without one.
 	ForwardedIP string
 }
@@ -177,6 +180,16 @@ type Listener struct {
 
 // Listen starts accepting on addr.
 func Listen(addr string, cfg Config) (*Listener, error) {
+	return listenWith(cfg, func() (net.Listener, error) { return net.Listen("tcp", addr) })
+}
+
+// ListenOn starts accepting on ln, a listener the caller made: one that shares its port with
+// something else, for instance, and hands over only the Minecraft connections.
+func ListenOn(ln net.Listener, cfg Config) (*Listener, error) {
+	return listenWith(cfg, func() (net.Listener, error) { return ln, nil })
+}
+
+func listenWith(cfg Config, open func() (net.Listener, error)) (*Listener, error) {
 	if cfg.Status == nil {
 		cfg.Status = func() Status { return Status{MOTD: "A Minecraft Server", MaxPlayers: 20} }
 	}
@@ -208,7 +221,7 @@ func Listen(addr string, cfg Config) (*Listener, error) {
 			return nil, err
 		}
 	}
-	ln, err := net.Listen("tcp", addr)
+	ln, err := open()
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +332,7 @@ func (l *Listener) negotiate(c *wire.Conn, ip string, deadline time.Time) (*Play
 	r := wire.NewReader(body)
 	protocol := r.VarInt()
 	host := r.String(255)
-	r.Uint16()
+	port := r.Uint16()
 	intent := r.VarInt()
 	if r.Err != nil {
 		return nil, r.Err
@@ -365,7 +378,7 @@ func (l *Listener) negotiate(c *wire.Conn, ip string, deadline time.Time) (*Play
 	if err != nil {
 		return nil, err
 	}
-	return &Player{Conn: c, Profile: prof, Info: info, Protocol: protocol, Version: ver, Address: host, ForwardedIP: fwdIP}, nil
+	return &Player{Conn: c, Profile: prof, Info: info, Protocol: protocol, Version: ver, Address: host, Port: port, ForwardedIP: fwdIP}, nil
 }
 
 // The newest version this package speaks; version.All lists every version clients may join with.
