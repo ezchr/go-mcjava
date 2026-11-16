@@ -167,8 +167,12 @@ func (s *Stack) Remove(t int32) {
 	s.Removed.Add(t)
 }
 
-// Reset empties the stack, keeping its slices for reuse.
+// Reset empties the stack, keeping its slices for reuse. What they held is dropped, so a stack
+// reused for every packet does not keep the last one's strings and component data alive.
 func (s *Stack) Reset() {
+	clear(s.Lore)
+	clear(s.CustomModelData.Strings)
+	clear(s.Raw)
 	*s = Stack{
 		Order:        s.Order[:0],
 		Lore:         s.Lore[:0],
@@ -437,8 +441,14 @@ func (s *Stack) decode(r *wire.Reader, delimited bool, p *Proto) {
 		fail(r, fmt.Errorf("%w: item id %d", ErrInvalid, s.ID))
 		return
 	}
+	// A patch holds each component type at most once (vanilla keeps it in a map), so it never has
+	// more components than the version has types.
+	types := int32(ComponentTypes)
+	if p != nil {
+		types = max(types, int32(len(p.compsIn)))
+	}
 	pos, neg := r.VarInt(), r.VarInt()
-	if pos < 0 || neg < 0 || int(pos)+int(neg) > r.Len() {
+	if pos < 0 || neg < 0 || pos > types || neg > types || int(pos)+int(neg) > r.Len() {
 		fail(r, fmt.Errorf("%w: %d/%d components", ErrInvalid, pos, neg))
 		return
 	}
@@ -469,6 +479,13 @@ func (s *Stack) decode(r *wire.Reader, delimited bool, p *Proto) {
 		if r.Err != nil {
 			return
 		}
+		// A repeated component would append to the lists of the first (lore, raw components), and
+		// encoding the stack writes all of a list once per repeat: a packet of repeats grew the
+		// stack many times its size and encoded to terabytes.
+		if s.Added.Has(t) || s.rawIndex(t) >= 0 {
+			fail(r, fmt.Errorf("%w: component %s twice", ErrInvalid, componentNames[t]))
+			return
+		}
 		if delimited {
 			b := take(r, int(r.VarInt()))
 			if r.Err != nil {
@@ -485,7 +502,7 @@ func (s *Stack) decode(r *wire.Reader, delimited bool, p *Proto) {
 					s.fromOld(t, p)
 				}
 				s.Added.Add(t)
-			} else if p != nil && rawKinds[t] == kindNone {
+			} else if p != nil && rawKind(t) == kindNone {
 				continue // its wire form may differ in the newest version
 			} else {
 				s.Raw = append(s.Raw, RawComponent{t, append([]byte(nil), b...)})
@@ -565,10 +582,19 @@ const (
 	kindUnit
 	kindNBT
 	kindInt32
+	kindProfile // minecraft:profile (ResolvableProfile), the same in 26.2 and 26.3
 )
 
+// rawKind is how the component t, which Stack does not model, is written (kindNone: not known).
+func rawKind(t int32) uint8 {
+	if t == CompProfile {
+		return kindProfile
+	}
+	return rawKinds[t]
+}
+
 // skipRaw skips the value of a component Stack does not model, if its wire form is known.
-func skipRaw(r *wire.Reader, t int32) bool { return skipKind(r, rawKinds[t]) }
+func skipRaw(r *wire.Reader, t int32) bool { return skipKind(r, rawKind(t)) }
 
 // skipKind skips a value of wire form kind (false: kindNone, not known).
 func skipKind(r *wire.Reader, kind uint8) bool {
@@ -586,10 +612,42 @@ func skipKind(r *wire.Reader, kind uint8) bool {
 	case kindUnit:
 	case kindNBT:
 		skipNBT(r)
+	case kindProfile:
+		skipProfile(r)
 	default:
 		return false
 	}
 	return true
+}
+
+// skipProfile skips a ResolvableProfile: a full game profile or a partial one, then the skin patch.
+func skipProfile(r *wire.Reader) {
+	if r.Bool() {
+		r.UUID()
+		r.String(16)
+	} else {
+		if r.Bool() {
+			r.String(16)
+		}
+		if r.Bool() {
+			r.UUID()
+		}
+	}
+	for n := length(r, 16, 2); n > 0 && r.Err == nil; n-- {
+		r.String(64)
+		r.String(32767)
+		if r.Bool() {
+			r.String(1024)
+		}
+	}
+	for range 3 { // body, cape and elytra textures
+		if r.Bool() {
+			r.String(32767)
+		}
+	}
+	if r.Bool() { // the model
+		r.Bool()
+	}
 }
 
 const maxList = 1 << 16

@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +67,9 @@ type Config struct {
 	// AcceptTransfers accepts clients sent here by another server's transfer packet (handshake
 	// intent 3), like vanilla's accepts-transfers. Off: they are refused, as vanilla does.
 	AcceptTransfers bool
+	// LoginCookies are the cookies asked for during login (cookie_request); the answers are in the
+	// Profile's Cookies. A client only has cookies a server stored before transferring it here.
+	LoginCookies []string
 
 	// OnlineMode checks every login with the session server (Microsoft accounts only, encrypted
 	// connection, real UUIDs and signed skins). Off: anyone can join under any name.
@@ -74,6 +78,10 @@ type Config struct {
 	// session server: an offline-mode server that lets anyone in under a free name, but protects
 	// the names of real accounts (staff, players whose data is keyed to them) from impersonation.
 	OnlineModeFor func(name string) bool
+	// AuthFailedMessage, when set, is the disconnect text for a login whose session-server check
+	// failed ("Failed to verify username!" if nil), e.g. to explain that a name belongs to a premium
+	// account on a server that also lets cracked players in.
+	AuthFailedMessage func(name string) string
 	// VelocitySecret, when set, takes each player's profile and address from a Velocity proxy's
 	// modern forwarding (signed with this secret, Velocity's forwarding.secret) instead of the client:
 	// the proxy authenticated them. OnlineMode must be off, and only the proxy may reach the
@@ -115,6 +123,12 @@ type ClientInfo struct {
 	TextFiltering  bool
 	AllowListing   bool
 	ParticleStatus int32
+	// CoreVersion is the version of the minecraft:core pack the client has: its own version, also when a
+	// proxy in front translates the packets of an older client ("" if it named none).
+	CoreVersion string
+	// PacksLoaded reports whether the server offered resource packs and the client loaded every one
+	// (a player who declined one, or whose download failed, sees the vanilla textures).
+	PacksLoaded bool
 }
 
 // Profile is a logged-in player's identity.
@@ -122,6 +136,10 @@ type Profile struct {
 	UUID       [16]byte
 	Name       string
 	Properties []Property
+	// Transferred: the client came with the transfer intent. Cookies: its answers to
+	// Config.LoginCookies (keys it has no cookie for are missing).
+	Transferred bool
+	Cookies     map[string][]byte
 }
 
 // Property is a profile property (textures carries the skin).
@@ -248,7 +266,7 @@ func (l *Listener) handle(nc net.Conn, ip string) {
 	c := wire.NewConn(nc)
 	// Login and configuration packets are small; the play limits apply from the hand-off.
 	c.SetMaxPacket(maxPrePlayPacket)
-	p, err := l.negotiate(c, ip, start.Add(l.cfg.LoginTimeout))
+	p, err := l.negotiateSafe(c, ip, start.Add(l.cfg.LoginTimeout))
 	l.limits.release(ip)
 	if err != nil {
 		if !errors.Is(err, errStatusDone) && !errors.Is(err, io.EOF) {
@@ -264,6 +282,23 @@ func (l *Listener) handle(nc net.Conn, ip string) {
 	case <-l.ctx.Done():
 		c.Close()
 	}
+}
+
+// errPanic is returned by negotiateSafe when negotiating panicked.
+var errPanic = errors.New("panic during login")
+
+// negotiateSafe is negotiate with a panic (in this package or in a callback such as Status) turned
+// into an error. Each connection has a goroutine of its own, so an unrecovered panic there would
+// take the whole server down instead of dropping this client.
+func (l *Listener) negotiateSafe(c *wire.Conn, ip string, deadline time.Time) (p *Player, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			l.cfg.Log.Error("panic during java login", "addr", c.NetConn().RemoteAddr(), "packet", c.LastPacketID(),
+				"panic", r, "stack", string(debug.Stack()))
+			p, err = nil, fmt.Errorf("%w: %v", errPanic, r)
+		}
+	}()
+	return l.negotiate(c, ip, deadline)
 }
 
 // maxPrePlayPacket is the largest packet accepted before play. The largest a vanilla client sends
@@ -289,6 +324,7 @@ func (l *Listener) negotiate(c *wire.Conn, ip string, deadline time.Time) (*Play
 	if r.Err != nil {
 		return nil, r.Err
 	}
+	transferred := intent == 3
 	switch intent {
 	case 1:
 		return nil, l.status(c, protocol)
@@ -316,7 +352,7 @@ func (l *Listener) negotiate(c *wire.Conn, ip string, deadline time.Time) (*Play
 		l.loginDisconnect(c, msg)
 		return nil, fmt.Errorf("protocol %d not supported", protocol)
 	}
-	prof, fwdIP, err := l.login(c, deadline)
+	prof, fwdIP, err := l.login(c, deadline, transferred)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +447,7 @@ func OfflineUUID(name string) [16]byte {
 	return u
 }
 
-func (l *Listener) login(c *wire.Conn, deadline time.Time) (Profile, string, error) {
+func (l *Listener) login(c *wire.Conn, deadline time.Time, transferred bool) (Profile, string, error) {
 	id, body, err := c.ReadPacket()
 	if err != nil {
 		return Profile{}, "", err
@@ -438,7 +474,24 @@ func (l *Listener) login(c *wire.Conn, deadline time.Time) (Profile, string, err
 		}
 	case l.cfg.OnlineMode, l.cfg.OnlineModeFor != nil && l.cfg.OnlineModeFor(name):
 		if prof, err = l.authenticate(c, name, deadline); err != nil {
+			// A cracked client using a premium name usually just closes the connection at the
+			// encryption request: worth an info line.
+			l.cfg.Log.Info("java login refused: Mojang login failed", "name", name, "addr", c.NetConn().RemoteAddr().String(), "err", err)
 			return Profile{}, "", err
+		}
+	}
+
+	prof.Transferred = transferred
+	for _, key := range l.cfg.LoginCookies {
+		v, ok, err := requestCookie(c, key)
+		if err != nil {
+			return Profile{}, "", err
+		}
+		if ok {
+			if prof.Cookies == nil {
+				prof.Cookies = map[string][]byte{}
+			}
+			prof.Cookies[key] = v
 		}
 	}
 
@@ -528,7 +581,9 @@ func (l *Listener) configure(c *wire.Conn, ver *version.Version, local bool) (Cl
 		return info, err
 	}
 	sentRegistries := false
+	coreVersion := ""
 	pending := map[[16]byte]*ResourcePack{}
+	packsOffered, packsLoaded := false, true
 	stopKeepAlive := func() {}
 	defer func() { stopKeepAlive() }()
 	for {
@@ -566,8 +621,11 @@ func (l *Listener) configure(c *wire.Conn, ver *version.Version, local bool) (Cl
 				if ns == "minecraft" && pid == "core" && (pv == ver.Name || strings.HasPrefix(pv, ver.Name+".") || local) {
 					core = true
 				}
-				if ns == "minecraft" && pid == "core" && l.cfg.Log != nil {
-					l.cfg.Log.Info("java known core pack", "client", pv, "server", ver.Name)
+				if ns == "minecraft" && pid == "core" {
+					coreVersion = pv
+					if l.cfg.Log != nil {
+						l.cfg.Log.Info("java known core pack", "client", pv, "server", ver.Name)
+					}
 				}
 			}
 			if r.Err != nil {
@@ -593,6 +651,7 @@ func (l *Listener) configure(c *wire.Conn, ver *version.Version, local bool) (Cl
 				packs = l.cfg.TranslatedResourcePacks
 			}
 			for _, rp := range packs {
+				packsOffered = true
 				pending[rp.id()] = rp
 				c.WritePacket(ver.ClientboundConfig(v777.ClientboundConfigurationResourcePackPush), rp.push())
 			}
@@ -628,6 +687,9 @@ func (l *Listener) configure(c *wire.Conn, ver *version.Version, local bool) (Cl
 				disconnect(c, ver.ClientboundConfig(v777.ClientboundConfigurationDisconnect), "This server needs its resource pack.")
 				return info, fmt.Errorf("required resource pack refused (status %d)", status)
 			}
+			if status != packLoaded {
+				packsLoaded = false
+			}
 			delete(pending, id)
 			if len(pending) == 0 {
 				stopKeepAlive()
@@ -640,6 +702,8 @@ func (l *Listener) configure(c *wire.Conn, ver *version.Version, local bool) (Cl
 			if !sentRegistries {
 				return info, errors.New("client finished configuration early")
 			}
+			info.CoreVersion = coreVersion
+			info.PacksLoaded = packsOffered && packsLoaded
 			return info, nil
 		case v777.ServerboundConfigurationCustomPayload, v777.ServerboundConfigurationKeepAlive,
 			v777.ServerboundConfigurationPong:
@@ -775,4 +839,38 @@ func (rp *ResourcePack) push() []byte {
 		TextComponent(&w, rp.Prompt)
 	}
 	return w.B
+}
+
+// requestCookie asks the client for the cookie key during login and reads its answer (ok false:
+// it has none).
+func requestCookie(c *wire.Conn, key string) ([]byte, bool, error) {
+	var w wire.Writer
+	w.String(key)
+	if err := c.Send(v777.ClientboundLoginCookieRequest, w.B); err != nil {
+		return nil, false, err
+	}
+	id, body, err := c.ReadPacket()
+	if err != nil {
+		return nil, false, err
+	}
+	if id != v777.ServerboundLoginCookieResponse {
+		return nil, false, fmt.Errorf("login: expected cookie_response, got %#x", id)
+	}
+	r := wire.NewReader(body)
+	got := r.String(32767)
+	has := r.Bool()
+	if r.Err != nil {
+		return nil, false, r.Err
+	}
+	if got != key {
+		return nil, false, fmt.Errorf("login: cookie %q answered for %q", got, key)
+	}
+	if !has {
+		return nil, false, nil
+	}
+	v := append([]byte(nil), r.ByteArray(5120)...) // the packet buffer is reused
+	if r.Err != nil {
+		return nil, false, fmt.Errorf("login: bad cookie payload: %w", r.Err)
+	}
+	return v, true, nil
 }

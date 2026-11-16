@@ -109,7 +109,11 @@ func (l *Listener) authenticate(c *wire.Conn, name string, deadline time.Time) (
 		return Profile{}, err
 	}
 	if err != nil {
-		l.loginDisconnect(c, "Failed to verify username!")
+		msg := "Failed to verify username!"
+		if l.cfg.AuthFailedMessage != nil {
+			msg = l.cfg.AuthFailedMessage(name)
+		}
+		l.loginDisconnect(c, msg)
 		return Profile{}, err
 	}
 	return prof, nil

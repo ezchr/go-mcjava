@@ -1,13 +1,12 @@
 # go-mcjava
 
-The Minecraft Java Edition protocol in Go, written for **crossplay**: it is the protocol half of the
-[Java crossplay in ezchr/dragonfly](https://github.com/ezchr/dragonfly/tree/crossplay/server/java), which lets Java Edition players join a
-[Dragonfly](https://github.com/df-mc/dragonfly) (Bedrock) server natively, with no ViaProxy or
-Geyser in between.
+The Minecraft Java Edition protocol in Go, written for **crossplay**: Java Edition players on
+Bedrock servers. It is the Java protocol library of:
 
-> **Crossplay note.** The packages here have no Dragonfly dependency and can be used on their own.
-> The Dragonfly integration that uses them **does not work with normal Dragonfly**: it lives on
-> the `crossplay` branch of [ezchr/dragonfly](https://github.com/ezchr/dragonfly/tree/crossplay/server/java), next to the hooks it needs.
+- [Crossfly](https://github.com/ezchr/crossfly): Java and Bedrock players natively on one Dragonfly server.
+- [Delta](https://github.com/ezchr/delta): an Endstone plugin that lets Java players play on BDS servers.
+
+The packages have no Dragonfly or Bedrock dependency and can be used on their own.
 
 Java **26.3** (protocol 777) and **26.2** (protocol 776) clients are supported. A server is written
 against 26.3; the `version` package converts its ids for 26.2 clients.
@@ -20,7 +19,7 @@ bounds-checked, and the encoders are checked byte for byte against vanilla.
 | `wire` | Data types, packet framing, compression and encryption |
 | `v777`, `v776` | Packet ids, registries and configuration packets per version, generated from Mojang's data reports and a vanilla join |
 | `version` | Maps the ids a 26.3 server writes to an older client's (packets, block states, registries) |
-| `server` | Handshake, status, offline and online (Microsoft) login, and configuration, with per-IP and auth limits |
+| `server` | Handshake, status, offline and online (Microsoft) login, Velocity modern forwarding, login cookies, and configuration, with per-IP and auth limits |
 | `chunk` | `level_chunk_with_light` encoding and decoding |
 | `item` | Item stacks (slots) with data component patches, per version |
 | `text` | Network NBT text components and legacy colour codes |
