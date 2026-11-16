@@ -560,9 +560,10 @@ func forwardedLocal(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// configure runs the configuration phase and returns what the client said about itself. A local
-// client (see forwardedLocal) may report no or an older core pack: a translator in front of it
-// maps the rest.
+// configure runs the configuration phase and returns what the client said about itself. A client
+// without this version's core pack gets the full registry data, wherever it connects from: a
+// 1.21 client behind ViaBackwards on the same machine got names only and dropped with "Network
+// Protocol Error" (Registry Loading). local is kept for callers' logging.
 func (l *Listener) configure(c *wire.Conn, ver *version.Version, local bool) (ClientInfo, error) {
 	var info ClientInfo
 	var w wire.Writer
@@ -618,7 +619,7 @@ func (l *Listener) configure(c *wire.Conn, ver *version.Version, local bool) (Cl
 				// The release or one of its patches (26.2, 26.2.1): the same protocol has the same
 				// registries. An exact match left a patched client (Lunar on 26.2) without any of
 				// our resource packs.
-				if ns == "minecraft" && pid == "core" && (pv == ver.Name || strings.HasPrefix(pv, ver.Name+".") || local) {
+				if ns == "minecraft" && pid == "core" && (pv == ver.Name || strings.HasPrefix(pv, ver.Name+".")) {
 					core = true
 				}
 				if ns == "minecraft" && pid == "core" {
@@ -634,7 +635,7 @@ func (l *Listener) configure(c *wire.Conn, ver *version.Version, local bool) (Cl
 			// Without the core pack the client can't fill in the entries we send by name only, so it
 			// gets vanilla's registries with their data, as vanilla does.
 			var full [][]byte
-			if !core && !local {
+			if !core {
 				full = ver.FullRegistryData()
 			}
 			for k := 0; i < len(pk); i++ {
