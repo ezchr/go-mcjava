@@ -21,7 +21,7 @@ bounds-checked, and the encoders are checked byte for byte against vanilla.
 | `version` | Maps the ids a 26.3 server writes to an older client's (packets, block states, registries) |
 | `server` | Handshake, status, offline and online (Microsoft) login, Velocity modern forwarding, login cookies, and configuration, with per-IP and auth limits |
 | `chunk` | `level_chunk_with_light` encoding and decoding |
-| `item` | Item stacks (slots) with data component patches, per version |
+| `item` | Item stacks (slots) with data component patches, per version: the wire form of every data component (122 in 26.3), so any stack is read and written again byte for byte, and for a 26.2 client with its ids and forms; typed values for the ones servers set (profile, banner patterns, trim, fireworks, books, containers, attribute modifiers, food, tools...) |
 | `text` | Network NBT text components and legacy colour codes |
 | `textcolour` | Bedrock's colour code palette and colour gradients (`<gradient:#FF2020:&6>text</gradient>`) for either edition |
 | `cmd/javagen`, `cmd/remapgen` | Generate the `vNNN` packages and the remap tables from Mojang's reports |

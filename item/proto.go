@@ -13,8 +13,9 @@ import (
 // Proto is the item side of a protocol version older than the newest (26.3): its ids of items, data
 // component types and the registries stacks refer to (enchantments, potions, mob effects). Stacks
 // always hold newest ids; the *For methods turn them into the version's ids when encoding and back
-// when decoding. Components the other version lacks are left out, and so are raw components whose
-// wire form may differ between the versions (anything but a plain number, string, flag or NBT).
+// when decoding, raw components included: their values are written in the version's wire form with
+// its ids (schema.go). Components the other version lacks are left out, and so is a component
+// whose value names something the other version does not have.
 //
 // A nil *Proto is the newest version: nothing is remapped.
 type Proto struct {
@@ -25,6 +26,8 @@ type Proto struct {
 	enchants, enchantsIn []int32
 	names                []string        // the version's item keys by its id
 	oldKinds             map[int32]uint8 // wire form of the version's components the newest lacks
+	v                    *version.Version
+	regs                 sync.Map // registry name -> *registry
 	// stackFix is, by newest item id, the item's default max_stack_size where the version's
 	// stand-in has another one (0: same), sent as a max_stack_size component.
 	stackFix []uint8
@@ -36,6 +39,94 @@ var older = map[int32]struct {
 	synced  map[string][]string
 }{
 	776: {v776.Builtin, v776.Registries},
+}
+
+// renamedComps are components of older versions by the name the newest has them under, with the
+// same wire form: 26.2's swing_animation is 26.3's attack_animation (26.3 split interact_animation
+// off it).
+var renamedComps = map[string]string{
+	"minecraft:swing_animation": "minecraft:attack_animation",
+}
+
+// registry is the ids of one registry in the newest version and a Proto's: out[newest id] is the
+// version's, in[version's id] the newest (-1: none). Both nil: the ids are the same.
+type registry struct{ out, in []int32 }
+
+// registry returns the id tables of a registry (by its key, "minecraft:sound_event").
+func (p *Proto) registry(name string) *registry {
+	if r, ok := p.regs.Load(name); ok {
+		return r.(*registry)
+	}
+	r := p.newRegistry(name)
+	p.regs.Store(name, r)
+	return r
+}
+
+func (p *Proto) newRegistry(name string) *registry {
+	switch name {
+	case "minecraft:item":
+		return &registry{p.items, p.itemsIn}
+	case "minecraft:data_component_type":
+		return &registry{p.comps, p.compsIn}
+	case "minecraft:mob_effect":
+		return &registry{p.effects, p.effectsIn}
+	case "minecraft:potion":
+		return &registry{p.potions, p.potionsIn}
+	case "minecraft:enchantment":
+		return &registry{p.enchants, p.enchantsIn}
+	}
+	old := older[p.v.Protocol]
+	// The entries by id, of a built-in registry or of one sent in configuration (a registry can
+	// be one in a version and the other in the next).
+	names := func(builtin map[string]map[string]int32, synced map[string][]string) []string {
+		if list, ok := synced[name]; ok {
+			return list
+		}
+		m, ok := builtin[name]
+		if !ok {
+			return nil
+		}
+		list := make([]string, len(m))
+		for n, id := range m {
+			if int(id) < len(list) {
+				list[id] = n
+			}
+		}
+		return list
+	}
+	newest, version := names(v777.Builtin, v777.Registries), names(old.builtin, old.synced)
+	if newest == nil && version == nil {
+		return &registry{} // not a registry the tables have (an enum, villager types): the same ids
+	}
+	r := &registry{out: make([]int32, len(newest)), in: make([]int32, len(version))}
+	byName := make(map[string]int32, len(version))
+	for id, n := range version {
+		byName[n] = int32(id)
+	}
+	newestID := make(map[string]int32, len(newest))
+	for id, n := range newest {
+		newestID[n] = int32(id)
+		if o, ok := byName[n]; ok {
+			r.out[id] = o
+		} else {
+			r.out[id] = -1
+		}
+	}
+	for id, n := range version {
+		if nid, ok := newestID[n]; ok {
+			r.in[id] = nid
+		} else {
+			r.in[id] = -1
+		}
+	}
+	// The version package's table knows stand-ins for entries the version lacks (a sound, an
+	// entity type): better than leaving the component out.
+	if t := p.v.BuiltinTable(name); len(t) == len(r.out) {
+		r.out = t
+	} else if t := p.v.SyncedTable(name); len(t) == len(r.out) {
+		r.out = t
+	}
+	return r
 }
 
 // removedKinds is the wire form of components older versions have and the newest does not, so a
@@ -76,6 +167,7 @@ func newProto(v *version.Version) *Proto {
 		potions:  v.BuiltinTable("minecraft:potion"),
 		enchants: v.SyncedTable("minecraft:enchantment"),
 		oldKinds: map[int32]uint8{},
+		v:        v,
 	}
 	// Reverse tables by name: an id of the old version maps to the newest entry of the same name,
 	// never to a newer entry that only falls back to it.
@@ -102,6 +194,15 @@ func newProto(v *version.Version) *Proto {
 	for nid, o := range p.enchants {
 		if o >= 0 && int(o) < len(p.enchantsIn) {
 			p.enchantsIn[o] = int32(nid)
+		}
+	}
+	// A component that was renamed: the same value under another name.
+	for oldName, newName := range renamedComps {
+		oid, ok := old.builtin["minecraft:data_component_type"][oldName]
+		nid, ok2 := v777.Builtin["minecraft:data_component_type"][newName]
+		if ok && ok2 && int(nid) < len(p.comps) && p.comps[nid] < 0 && p.compsIn[oid] < 0 {
+			p.comps = append([]int32(nil), p.comps...) // the version package's table is shared
+			p.comps[nid], p.compsIn[oid] = oid, nid
 		}
 	}
 	p.names = make([]string, len(p.itemsIn))
@@ -199,12 +300,6 @@ func (p *Proto) EffectIn(id int32) int32 {
 	return mapID(p.effectsIn, id)
 }
 
-// keepRaw reports whether a raw component of newest type t can be sent to the version as it is: the
-// version has it and its wire form is a plain value, the same in both versions.
-func (p *Proto) keepRaw(t int32) bool {
-	return uint32(t) < ComponentTypes && rawKind(t) != kindNone && mapID(p.comps, t) >= 0
-}
-
 // skipOld skips the value of the version's component type ot that the newest version lacks.
 func (p *Proto) skipOld(r *wire.Reader, ot int32) bool { return skipKind(r, p.oldKinds[ot]) }
 
@@ -221,8 +316,16 @@ func (s *Stack) encodeOld(w *wire.Writer, delimited bool, p *Proto) {
 		mapID(p.comps, CompMaxStackSize) >= 0 {
 		fix = int32(f)
 	}
+	// The raw components in the version's form (nil: it has no place for one).
+	var conv [][]byte
+	if len(s.Raw) > 0 {
+		conv = make([][]byte, len(s.Raw))
+		for i := range s.Raw {
+			conv[i], _ = p.rawToOld(s.Raw[i].Type, s.Raw[i].Data)
+		}
+	}
 	var buf [24]int32
-	list := s.oldComponents(buf[:0], p, fix != 0)
+	list := s.oldComponents(buf[:0], p, fix != 0, conv)
 	removed := 0
 	for wi, word := range s.Removed {
 		for word != 0 {
@@ -246,7 +349,7 @@ func (s *Stack) encodeOld(w *wire.Writer, delimited bool, p *Proto) {
 		case t == CompMaxStackSize && fix != 0:
 			w.VarInt(fix)
 		default:
-			w.Raw(s.Raw[s.rawIndex(t)].Data)
+			w.Raw(conv[s.rawIndex(t)])
 		}
 		if delimited {
 			lengthPrefix(w, start)
@@ -264,8 +367,8 @@ func (s *Stack) encodeOld(w *wire.Writer, delimited bool, p *Proto) {
 
 // oldComponents appends the added components (newest types) the version gets, in the order they are
 // written: Order if set, else ascending by the version's id like vanilla. stackFix adds
-// max_stack_size (see Proto.stackFix).
-func (s *Stack) oldComponents(list []int32, p *Proto, stackFix bool) []int32 {
+// max_stack_size (see Proto.stackFix). conv is the raw components in the version's form.
+func (s *Stack) oldComponents(list []int32, p *Proto, stackFix bool, conv [][]byte) []int32 {
 	added := s.Added.and(Modeled)
 	if len(s.Order) > 0 {
 		for _, t := range s.Order {
@@ -273,7 +376,7 @@ func (s *Stack) oldComponents(list []int32, p *Proto, stackFix bool) []int32 {
 				if mapID(p.comps, t) >= 0 {
 					list = append(list, t)
 				}
-			} else if s.rawIndex(t) >= 0 && p.keepRaw(t) {
+			} else if i := s.rawIndex(t); i >= 0 && conv[i] != nil {
 				list = append(list, t)
 			}
 		}
@@ -295,7 +398,7 @@ func (s *Stack) oldComponents(list []int32, p *Proto, stackFix bool) []int32 {
 		}
 	}
 	for i := range s.Raw {
-		if t := s.Raw[i].Type; p.keepRaw(t) && !added.Has(t) {
+		if t := s.Raw[i].Type; conv[i] != nil && !added.Has(t) {
 			list = append(list, t)
 		}
 	}

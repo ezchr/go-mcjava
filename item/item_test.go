@@ -217,7 +217,7 @@ func TestText(t *testing.T) {
 func TestHostile(t *testing.T) {
 	for _, h := range []string{
 		"01", "019a08", "019a08ffffffff0f00", "019a08017f", "019a0801000b05", "019a080100060aff",
-		"019a080100000a090001610a7fffffff", "01ffffffff0f0000", "019a0801001000",
+		"019a080100000a090001610a7fffffff", "01ffffffff0f0000", "019a0801007f00",
 	} {
 		b, _ := hex.DecodeString(h)
 		var s Stack
